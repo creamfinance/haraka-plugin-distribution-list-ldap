@@ -1,0 +1,22 @@
+{
+    "engines": {
+        "node": ">= 9"
+    },
+    "author": {
+        "name": "Thomas Rosenstein",
+        "email": "thomas.rosenstein@creamfinance.com"
+    },
+    "description": "A plugin that allows for Active Directory distribution lists to be handled.",
+    "version": "1.0.0",
+    "license": "MIT",
+    "main": "index.js",
+    "name": "haraka-plugin-distribution-list-ldap",
+    "bundleDependencies": false,
+    "dependencies": {
+        "ldapjs": "^1.0.1"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+ssh://git@github.com:creamfinance/haraka-plugin-distribution-list-ldap.git"
+    }
+}
