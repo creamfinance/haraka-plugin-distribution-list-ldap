@@ -36,6 +36,8 @@ class DistributionListPlugin {
         const final_rcpt = [];
         let filter = '';
 
+        connection.logdebug(plugin, recipients);
+
         // there's always only one recipient
         var recipient = recipients[0];
         let members = recipient.member;
@@ -204,7 +206,7 @@ class DistributionListPlugin {
         return {
             filter: cfg.filter.replace(/%u/g, plain_rcpt),
             scope: 'sub',
-            attributes: ['dn','members','mail','proxyAddresses']
+            attributes: ['dn','member','mail','proxyAddresses']
         };
     }
 }
