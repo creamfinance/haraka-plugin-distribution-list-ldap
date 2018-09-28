@@ -94,11 +94,8 @@ class DistributionListPlugin {
 
                     emitter.on('end', (result) => {
                         txn.rcpt_to = final_rcpt;
-                        this.outbound.send_email(txn, (data) => {
-                            connection.loginfo('Called Next!', data);
 
-                            next(OK);
-                        });
+                        next();
                     });
                 }
             );

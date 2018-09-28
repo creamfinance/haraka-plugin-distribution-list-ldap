@@ -7,7 +7,7 @@
         "email": "thomas.rosenstein@creamfinance.com"
     },
     "description": "A plugin that allows for Active Directory distribution lists to be handled.",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "license": "MIT",
     "main": "index.js",
     "name": "haraka-plugin-distribution-list-ldap",
