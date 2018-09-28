@@ -42,16 +42,25 @@ class DistributionListPlugin {
         var recipient = recipients[0];
         let members = recipient.member;
 
+
+        // Check if we got a distribution list, or a security list
+        if (((recipient.groupType & 0x80000000) >>> 0) == 0x80000000) {
+            connection.logdebug(plugin, 'Security Group, skipping');
+            return next();
+        }
+
         if (!(members instanceof Array)) {
             members = [ members ];
         }
 
         if (members.length > 0) {
-            filter = '(distinguishedName=' + members[0] + ')';
+            filter = '(|';
 
-            for (var x = 1; x < members.length; x++) {
-                filter = '(|' + filter + '(distinguishedName=' + members[x] + '))'
+            for (var x = 0; x < members.length; x++) {
+                filter += '(distinguishedName=' + members[x] + ')';
             }
+
+            filter += ')'
         }
 
         connection.logdebug(plugin, 'Final search filter: ' + filter);
@@ -206,7 +215,7 @@ class DistributionListPlugin {
         return {
             filter: cfg.filter.replace(/%u/g, plain_rcpt),
             scope: 'sub',
-            attributes: ['dn','member','mail','proxyAddresses']
+            attributes: ['dn','member','mail','proxyAddresses','groupType']
         };
     }
 }
