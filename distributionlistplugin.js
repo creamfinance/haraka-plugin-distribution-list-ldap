@@ -27,6 +27,11 @@ class DistributionListPlugin {
         const plugin = this.plugin;
         const txn = connection.transaction;
         const results = txn.results.get('distribution-list-ldap');
+
+        if (!results || !results.recipients) {
+            return next();
+        }
+
         const recipients = results.recipients;
         const final_rcpt = [];
         let filter = '';
