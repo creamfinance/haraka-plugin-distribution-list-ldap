@@ -9,6 +9,7 @@ expands the members to their main email addresses.
 ```
 settings:
   refresh_interval: 600
+  deny_unknown: True
   url: ldaps://samba.example.com:636
   basedn: OU=ExampleOU,DC=example,DC=com
   bind:

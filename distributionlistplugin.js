@@ -189,29 +189,16 @@ class DistributionListPlugin {
         const txn = connection.transaction;
         const results = txn.results.get('distribution-list-ldap');
 
-        if (!results || !results.recipients) {
+        if (!results || !results.recipients || !results.recipients[0] || !results.recipients[0].is_distribution_list) {
             return next();
         }
 
-        const recipients = results.recipients;
-        const final_rcpt = [];
-        let filter = '';
-
-        connection.logdebug(plugin, recipients);
-
-        // there's always only one recipient
-        var recipient = recipients[0];
-
-        if (!recipient) {
-            return next();
-        }
-
-        if (!recipient.is_distribution_list) {
-            return next(OK);
-        }
+        const recipient = results.recipients[0];
 
         let members = recipient.members_resolved;
         txn.rcpt_to = members;
+
+        next();
     }
 
     onRcpt (next, connection, params) {
@@ -248,6 +235,8 @@ class DistributionListPlugin {
         if (plain_rcpt in this.lookup_table) {
             txn.results.add(plugin, { recipients: [ this.lookup_table[plain_rcpt] ] });
             next(OK);
+        } else if (this.cfg.settings.deny_unknown) {
+            next(DENY, 'Sorry - no mailbox here by that name');
         } else {
             next();
         }
