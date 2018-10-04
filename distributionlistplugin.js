@@ -6,6 +6,10 @@ class DistributionListPlugin {
         this.plugin = plugin;
         Address = require('address-rfc2821').Address;
         this.outbound = require('outbound');
+
+        this.lookup_table = {};
+        this.is_loaded = false;
+        this.ldap_loading_interval = null;
     }
 
     register () {
@@ -21,6 +25,163 @@ class DistributionListPlugin {
 
     loadConfig () {
         this.cfg = this.plugin.config.get('distribution-list-ldap.yaml');
+
+        this.loadLdapConfiguration();
+
+        if (this.ldap_loading_interval) {
+            clear_interval(this.ldap_loading_interval);
+        }
+
+        var interval = (this.cfg.settings.refresh_interval || 600) * 1000;
+        this.ldap_loading_interval = setInterval(this.loadLdapConfiguration.bind(this), interval);
+        this.plugin.loginfo('Set reloading interval to ' + interval + ' ms');
+
+    }
+
+    async getLdapConnection () {
+        return new Promise((resolve, reject) => {
+            if (this.ldapConnection) {
+                return this.ldapConnection;
+            }
+
+            const conn = ldap.createClient({ url: this.cfg.settings.url });
+
+            conn.bind(this.cfg.settings.bind.dn, this.cfg.settings.bind.pw, (err) => {
+                if (err) {
+                    return reject(err);
+                }
+
+                resolve(conn);
+            });
+        });
+    }
+
+    async ldapSearch (client, filter) {
+        const rawTypes = [ 'objectGUID' ];
+        const arrayTypes = [ 'member', 'proxyAddresses' ]
+
+        return new Promise((resolve, reject) => {
+            const options = { scope: 'sub', attributes: [ 'dn', 'objectGUID', 'member', 'mail', 'proxyAddresses', 'groupType' ], filter: filter };
+
+            client.search(this.cfg.settings.basedn, options, (err, emitter) => {
+                if (err) {
+                    return reject(err);
+                }
+
+                const items = [];
+
+                emitter.on('searchEntry', (entry) => {
+                    const object = { dn: entry.dn };
+
+                    for (let i = 0; i < entry.attributes.length; i++) {
+                        const attr = entry.attributes[i];
+
+                        if (rawTypes.indexOf(attr.type) !== -1) {
+                            object[attr.type] = attr.buffers[0].toString('hex');
+                        } else if (arrayTypes.indexOf(attr.type) !== -1) {
+                            object[attr.type] = (attr.vals instanceof Array ? attr.vals : [ attr.vals ]);
+                        } else {
+                            object[attr.type] = attr.vals[0];
+                        }
+                    }
+
+                    items.push(object);
+                });
+
+                emitter.on('error', (err) => {
+                    reject(err);
+                });
+
+                emitter.on('end', (result) => {
+                    resolve(items);
+                });
+            });
+        });
+    }
+
+    assignEmailToObject(container, object, mail) {
+        // No op, we don't do anything if empty
+        if (!mail) {
+            return;
+        }
+
+        if (mail in container) {
+            this.log('Object has double address: ', mail, object);
+        } else {
+            container[mail] = object;
+        }
+    }
+
+    async loadLdapConfiguration () {
+        try {
+            const time_start = Date.now();
+
+            const client = await this.getLdapConnection();
+
+            // load all groups
+            const groups = await this.ldapSearch(client, this.cfg.groups.filter);
+
+            // load all users
+            const users = await this.ldapSearch(client, this.cfg.users.filter);
+
+            const time_assign = Date.now()
+
+            // build dictionary of groups:
+            const final_emails = {};
+            const dn_map_users = {};
+
+            // build dictionary for users
+            for (let i = 0; i < users.length; i++) {
+                const user = users[i];
+
+                dn_map_users[user.dn] = user;
+
+                this.assignEmailToObject(final_emails, user, user.mail);
+
+                if (user.proxyAddresses) {
+                    for (let x = 0; x < user.proxyAddresses.length; x++) {
+                        this.assignEmailToObject(final_emails, user, user.proxyAddresses[x]);
+                    }
+                }
+            }
+
+            for (let i = 0; i < groups.length; i++) {
+                const group = groups[i];
+
+                this.assignEmailToObject(final_emails, group, group.mail);
+
+                if (group.proxyAddresses) {
+                    for (let x = 0; x < group.proxyAddresses.length; x++) {
+                        this.assignEmailToObject(final_emails, group, group.proxyAddresses[x]);
+                    }
+                }
+
+                // Security Groups don't resolve to all members, only distribution lists
+                if (group.member && (((group.groupType & 0x80000000) >>> 0) == 0)) {
+                    group.members_resolved = [];
+                    group.is_distribution_list = true;
+
+                    for (let x = 0; x < group.member.length; x++) {
+                        if (group.member[x] in dn_map_users) {
+                            group.members_resolved.push(dn_map_users[group.member[x]].mail);
+                        } else {
+                            this.plugin.logerror('Unable to find member in users list: ', group.dn, group.member[x]);
+                        }
+                    }
+                } else {
+                    group.is_distribution_list = false;
+                }
+            }
+
+            const time_done = Date.now();
+
+            this.plugin.logdebug('Ldap Configuration Update took: ' + (time_done - time_start) + ' ms, Assign: ' + (time_done - time_assign) + ' ms');
+
+            this.lookup_table = final_emails;
+            this.is_loaded = true;
+        } catch (err) {
+            console.log(err);
+        }
     }
 
     onQueue (next, connection, params) {
@@ -40,77 +201,17 @@ class DistributionListPlugin {
 
         // there's always only one recipient
         var recipient = recipients[0];
-        let members = recipient.member;
 
-
-        // Check if we got a distribution list, or a security list
-        if (((recipient.groupType & 0x80000000) >>> 0) == 0x80000000) {
-            connection.logdebug(plugin, 'Security Group, skipping');
+        if (!recipient) {
             return next();
         }
 
-        if (!(members instanceof Array)) {
-            members = [ members ];
+        if (!recipient.is_distribution_list) {
+            return next(OK);
         }
 
-        if (members.length > 0) {
-            filter = '(|';
-
-            for (var x = 0; x < members.length; x++) {
-                filter += '(distinguishedName=' + members[x] + ')';
-            }
-
-            filter += ')'
-        }
-
-        connection.logdebug(plugin, 'Final search filter: ' + filter);
-
-        var cfg = this.cfg.main;
-
-        // Check if we can find a group (based on the filter), that has this email (based on the filter)
-        let client;
-
-        try {
-            client = ldap.createClient({ url: cfg.server });
-        } catch (e) {
-            connection.logerror(plugin, 'connect error: ' + e);
-            return next();
-        }
-
-        // Handle the login
-        client.bind(cfg.binddn, cfg.bindpw, (err) => {
-            if (err) {
-                connection.logerror(plugin, 'Bind Error: ' + err);
-                return next(DENYSOFT, 'Backend failure. Please retry later.');
-            }
-
-            client.search(
-                cfg.basedn,
-                { filter: filter, scope: 'sub', attributes: [ 'dn', 'mail' ] },
-                (err, emitter) => {
-                    if (err) {
-                        connection.logerror(plugin, 'Queue/Search', err);
-                        return next(DENYSOFT, 'Backend error. Please retry later.')
-                    }
-
-                    emitter.on('searchEntry', (entry) => {
-                        connection.logdebug(plugin, 'Adding to rcpt ' + entry.object.mail);
-                        final_rcpt.push(new Address(entry.object.mail));
-                    });
-
-                    emitter.on('error', (err) => {
-                        connection.logerror(plugin, 'Queue/Search/Error', err);
-                        next(DENYSOFT, 'Backend failure. Please retry later.')
-                    });
-
-                    emitter.on('end', (result) => {
-                        txn.rcpt_to = final_rcpt;
-
-                        next();
-                    });
-                }
-            );
-        });
+        let members = recipient.members_resolved;
+        txn.rcpt_to = members;
     }
 
     onRcpt (next, connection, params) {
@@ -129,94 +230,27 @@ class DistributionListPlugin {
         }
 
         const rcpt = txn.rcpt_to[txn.rcpt_to.length - 1];
+
         // check if we got a host part
         if (!rcpt.host) {
             txn.results.add(plugin, { fail: '!domain' });
             return next();
         }
 
-        txn.results.add(plugin, { msg: 'connecting' });
-
-        const domain = rcpt.host.toLowerCase();
-        const cfg = this.cfg[domain] || this.cfg.main;
-
-        if (!cfg || !cfg.binddn || !cfg.bindpw) {
-            connection.logerror(plugin, 'no LDAP config found for ' + domain);
-            return next();
-        }
-
-        // Check if we can find a group (based on the filter), that has this email (based on the filter)
-        let client;
-
-        try {
-            client = ldap.createClient({ url: cfg.server });
-        } catch (e) {
-            connection.logerror(plugin, 'connect error: ' + e);
-            return next();
-        }
-
-        client.on('error', (err) => {
-            connection.logerror(plugin, 'Connection Error: ' + err);
+        if (!this.is_loaded) {
+            connection.logerror(plugin, 'Not loaded yet');
             return next(DENYSOFT, 'Backend failure. Please retry later.');
-        });
+        }
 
-        // Handle the login
-        client.bind(cfg.binddn, cfg.bindpw, (err) => {
-            if (err) {
-                connection.logerror(plugin, 'Bind Error: ' + err);
-                return next(DENYSOFT, 'Backend failure. Please retry later.');
-            }
-
-            const options = this.getSearchOptions(cfg, rcpt);
-
-            connection.logdebug(plugin, options);
-
-            client.search(cfg.basedn, options, (err, emitter) => {
-                if (err) {
-                    connection.logerror(plugin, 'Rcpt/Search: ' + err);
-                    return next(DENYSOFT, 'Backend failure. Please retry later.');
-                }
-
-                const items = [];
-
-                emitter.on('searchEntry', (entry) => {
-                    connection.logdebug(plugin, entry.object);
-                    items.push(entry.object);
-                });
-
-                emitter.on('error', (err) => {
-                    connection.logerror(plugin, 'Rcpt/Search/Error', err);
-                    next(DENYSOFT, 'Backend failure. Please retry later.')
-                });
-
-                emitter.on('end', (result) => {
-
-                    if (items.length == 1) {
-                        txn.results.add(plugin, { recipients: items });
-
-                        return next(OK);
-                    }
-
-                    if (items.length > 1) {
-                        connection.logerror(plugin, 'Found multiple entries');
-                        return next(DENYSOFT, 'Backend failure. Please retry later.');
-                    }
-
-                    // continue here, pass on to next plugin
-                    next();
-                });
-            });
-        });
-    }
-
-    getSearchOptions (cfg, rcpt) {
         const plain_rcpt = rcpt.address().toLowerCase();
 
-        return {
-            filter: cfg.filter.replace(/%u/g, plain_rcpt),
-            scope: 'sub',
-            attributes: ['dn','member','mail','proxyAddresses','groupType']
-        };
+        // check if we can receive the mentioned email
+        if (plain_rcpt in this.lookup_table) {
+            txn.results.add(plugin, { recipients: [ this.lookup_table[plain_rcpt] ] });
+            next(OK);
+        } else {
+            next();
+        }
     }
 }
 

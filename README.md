@@ -7,15 +7,27 @@ expands the members to their main email addresses.
 ## Config
 
 ```
-main:
-  server: ldaps://samba.example.com:636
-  binddn: CN=Management,DC=example,DC=com
-  bindpw: examplePassword
+settings:
+  refresh_interval: 600
+  url: ldaps://samba.example.com:636
   basedn: OU=ExampleOU,DC=example,DC=com
-  filter: (&(objectClass=group)(|(mail=%u)(proxyAddresses=%u)))
+  bind:
+  	dn: CN=Management,DC=example,DC=com
+  	pwd: examplePassword
+
+groups:
+  filter: (&(objectClass=group)(|(mail=*)(proxyAddresses=*)))
+
+users:
+  filter: (&(objectClass=person)(|(mail=*)(proxyAddresses=*)))
 ```
 
-%u in the filter is replaced by the email in RCPT.
+Refresh interval gives the interval in which ldap is checked for new configuration settings.
+
+Groups filter all groups that should be checked. All members of the groups are filled from the users query.
+All users are also checked.
+
+Errors are shown if groups use the same emails, or users use the same email.
 
 
 ## Usage
